@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Server Control Panel</title>
+  <style>
+    :root{
+      --bg:#f6f7f9; --card:#fff; --text:#0f1115; --muted:#6b7280; --border:#e5e7eb;
+      --accent:#ff6a00; --accent-600:#e65f00; --accent-700:#cc5400; --black:#0b0c0f;
+      --shadow:0 8px 24px rgba(0,0,0,.08); --radius:12px; --radius-sm:10px; --focus:0 0 0 3px rgba(255,106,0,.25);
+    }
+    *{box-sizing:border-box} html,body{height:100%}
+    body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,"Noto Sans";color:var(--text);background:var(--bg);}
+    .app-header{background:var(--black);color:#fff;padding:18px 20px;position:sticky;top:0;z-index:20;box-shadow:0 2px 10px rgba(0,0,0,.2);}
+    .header-inner{max-width:1100px;margin:0 auto;display:flex;align-items:center;gap:14px;}
+    .logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#ffa366);display:grid;place-items:center;font-weight:800;color:#111;}
+    .title{display:flex;flex-direction:column;line-height:1.2}.title strong{font-size:18px}.title span{font-size:12px;color:#f1f1f1;opacity:.8}
+    .header-right{margin-left:auto;display:flex;gap:10px;align-items:center}
+    .badge{display:inline-flex;align-items:center;gap:6px;background:#fff6ef;color:var(--accent-700);border:1px solid #ffd7bf;border-radius:999px;padding:6px 12px;font-size:12px;font-weight:600}
+    .badge .dot{width:8px;height:8px;border-radius:999px;background:#25d366}
+    .container{max-width:1100px;margin:22px auto;padding:0 16px}
+    .grid{display:grid;grid-template-columns:1fr;gap:16px}
+    @media (min-width:980px){.grid{grid-template-columns:1fr 1fr}}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.08);padding:16px}
+    .card h3{margin:0 0 12px 0;font-size:16px;display:flex;align-items:center;gap:8px}
+    .eyebrow{display:inline-block;font-size:12px;color:var(--muted);margin-left:6px}
+    label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
+    .row{margin-bottom:12px}.stack{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    select,input[type=text],textarea{width:100%;background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:14px;color:var(--text);outline:none;transition:box-shadow .2s,border-color .2s}
+    select:focus,input:focus,textarea:focus{border-color:var(--accent);box-shadow:var(--focus)} .readonly{background:#fafafa}
+    .btn{appearance:none;border:1px solid transparent;background:#f3f4f6;color:#111;padding:10px 14px;border-radius:10px;font-weight:600;cursor:pointer;transition:transform .05s,background .2s,border-color .2s,color .2s}
+    .btn:active{transform:translateY(1px)} .btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)} .btn-primary:hover{background:var(--accent-600)}
+    .btn-outline{background:#fff;color:var(--accent);border-color:var(--accent)} .btn-outline:hover{background:#fff6ef}
+    .btn-ghost{background:#fff;border-color:var(--border);color:#111} .btn-ghost:hover{background:#f9fafb}
+    .status{min-height:18px;font-size:12px;color:var(--muted)} .status.ok{color:#1f8f4e} .status.error{color:#b00020}
+    #output{background:#0f1115;color:#e5e7eb;border-radius:12px;padding:14px;height:280px;overflow:auto;border:1px solid #1f232a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:13px}
+    #resultBox{background:#fff;color:#111;border-radius:12px;padding:14px;height:280px;overflow:auto;border:1px solid var(--border);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:13px;white-space:normal}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+
+    /* Custom dropdown */
+    .server-select{position:relative;min-width:220px}
+    .trigger{width:100%; display:flex; align-items:center; justify-content:space-between; gap:10px; background:#fff; border:1px solid var(--border); border-radius:10px; padding:8px 10px; cursor:pointer; user-select:none; color:#111;}
+    .trigger-left{display:flex; align-items:center; gap:10px; min-width:0}
+    .trigger .label{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px}
+    .chev{margin-left:auto; opacity:.6}
+    .dot{width:8px;height:8px;border-radius:999px;background:#9ca3af; flex:0 0 auto}
+    .menu{position:absolute; top:calc(100% + 6px); left:0; right:0; background:#fff; border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow); max-height:280px; overflow:auto; z-index:50; padding:6px; display:none;}
+    .item{display:flex; align-items:center; gap:10px; padding:10px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent;}
+    .item:hover{border-color:#f0f0f0; filter:brightness(0.98)}
+    .item .text{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+    .orange{background:#fff6ef; color:#c45500} .orange .dot{background:#ff6a00}
+    .white{background:#ffffff; color:#111; border-color:#e5e7eb} .white .dot{background:#111}
+    .black{background:#0f1115; color:#fff} .black .dot{background:#fff}
+    .trigger.orange{border-color:#ffd7bf; background:#fff6ef; color:#c45500}
+    .trigger.white{border-color:#e5e7eb; background:#ffffff; color:#111}
+    .trigger.black{border-color:#1f232a; background:#0f1115; color:#fff}
+    .bold{font-weight:800}
+
+    /* Highlighters for log lines */
+    .logline{white-space:pre-wrap}
+    .hl-bad{
+      background:#fff1f2;
+      color:#991b1b;
+      border-left:4px solid #ef4444;
+      padding-left:8px;
+      border-radius:4px;
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="logo">CO</div>
+      <div class="title">
+        <strong>Server Control Panel</strong>
+        <span>Operate securely inside /home/.../users/naser</span>
+      </div>
+      <div class="header-right">
+        <div class="server-select" id="serverSelectWrap">
+          <div class="trigger white" id="serverTrigger" onclick="toggleMenu()">
+            <div class="trigger-left">
+              <span class="dot" id="triggerDot"></span>
+              <span class="label" id="triggerLabel">Select a server...</span>
+            </div>
+            <span class="chev">▾</span>
+          </div>
+          <div class="menu" id="serverMenu"></div>
+        </div>
+        <button class="btn btn-outline" type="button" onclick="openDeploy()">Deploy</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="grid">
+      <section class="card">
+        <h3>Project <span class="eyebrow">Choose a subdirectory under naser</span></h3>
+        <div class="row">
+          <label for="projectSelect">Project</label>
+          <div class="stack">
+            <select id="projectSelect" style="min-width:220px;"></select>
+            <button class="btn btn-ghost" type="button" onclick="reloadProjects()">Reload</button>
+            <button class="btn btn-outline" type="button" onclick="listProjectDirectory()">List Directory</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="directory">Path</label>
+          <input class="readonly" type="text" id="directory" value="" readonly/>
+        </div>
+        <div id="projectStatus" class="status"></div>
+      </section>
+
+      <section class="card">
+        <h3>Scripts <span class="eyebrow">Run shell scripts inside the project</span></h3>
+        <div class="row">
+          <label for="scriptsSelect">Available scripts (.sh)</label>
+          <div class="stack">
+            <select id="scriptsSelect" style="min-width:260px;"></select>
+            <button class="btn btn-ghost" type="button" onclick="refreshScripts()">Refresh</button>
+            <button class="btn btn-primary" type="button" onclick="runSelectedScript()">Run Selected</button>
+            <button class="btn btn-outline" type="button" onclick="quickRunSendRequest()">Quick: send_request.sh</button>
+            <label class="badge" style="cursor:pointer;">
+              <input type="checkbox" id="postpaidFlag" style="margin-right:6px; accent-color:#ff6a00;">
+              Postpaid (CSVolte)
+            </label>
+          </div>
+        </div>
+        <div class="status">Runs in the selected project directory, so relative files like "input" resolve correctly.</div>
+      </section>
+
+      <section class="card">
+        <h3>Input File <span class="eyebrow">Overwrite 'input' with your content</span></h3>
+        <div class="row">
+          <label for="dataInput">Content</label>
+          <textarea id="dataInput" rows="7" placeholder="Enter data (multiple lines allowed)"></textarea>
+        </div>
+        <div class="toolbar">
+          <button class="btn btn-primary" type="button" onclick="writeData()">Save to input</button>
+          <button class="btn btn-outline" type="button" onclick="clearInput()">Clear Input</button>
+          <button class="btn btn-outline" type="button" onclick="showHint()">Hint</button>
+        </div>
+        <div id="writeStatus" class="status"></div>
+      </section>
+
+      <section class="card">
+        <h3>Result <span class="eyebrow">Content of 'results.txt'</span></h3>
+        <div class="toolbar" style="margin-bottom:10px;">
+          <button class="btn btn-ghost" type="button" onclick="refreshResult()">Refresh Result</button>
+          <button class="btn btn-outline" type="button" onclick="clearResults()">Clear Results</button>
+        </div>
+        <pre id="resultBox"></pre>
+      </section>
+
+      <section class="card" style="grid-column: 1 / -1;">
+        <h3>Output <span class="eyebrow">Logs and results</span></h3>
+        <div class="toolbar" style="margin-bottom:10px;">
+          <button class="btn btn-ghost" type="button" onclick="clearOutput()">Clear</button>
+          <button class="btn btn-outline" type="button" onclick="copyOutput()">Copy</button>
+        </div>
+        <pre id="output"></pre>
+        <div class="hint">Orange accents indicate actions. Backend endpoints remain compatible.</div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+  const API_BASE = 'http://127.0.0.1:8000';
+  const ROOT_BASE = '/home/bullkpsa_G2R0C0/users/naser';
+  const LS_SELECTED_PROJECT = 'selectedProject';
+  const LS_DEPLOY_SERVER = 'deploySelectedServerId';
+
+  // Highlight rules
+  const HIGHLIGHT_PATTERNS = [ /\bKO\b/i, /\bOS_Disabled\b/i ];
+
+  // Coloring logic (same as Deploy)
+  const ORANGE_OCTETS = new Set([40,41,42,43,44,48,150]);
+  const WHITE_OCTETS  = new Set([45,46,47,151]);
+  const BLACK_OCTETS  = new Set([49,50,152]);
+  const BOLD_OCTETS   = new Set([150,151,152]);
+
+  let servers = []; // {id, label, host}
+  let selectedServerId = localStorage.getItem(LS_DEPLOY_SERVER) || '';
+
+  function openDeploy(){ window.open('deploy.html', '_blank', 'noopener,noreferrer'); }
+
+  // HTML helpers for logs
+  function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+  function isHighlighted(line){ return HIGHLIGHT_PATTERNS.some(rx => rx.test(line)); }
+  function appendLines(preEl, text){
+    const lines = String(text || '').replace(/\r\n?/g,'\n').split('\n');
+    let html = '';
+    for (const ln of lines){
+      if (ln === '') { html += '<div class="logline">&nbsp;</div>'; continue; }
+      const cls = isHighlighted(ln) ? 'logline hl-bad' : 'logline';
+      html += `<div class="${cls}">${escapeHtml(ln)}</div>`;
+    }
+    preEl.insertAdjacentHTML('beforeend', html);
+    preEl.scrollTop = preEl.scrollHeight;
+  }
+  function setPanel(preEl, text){ preEl.innerHTML=''; appendLines(preEl, text); }
+
+  // Server dropdown helpers
+  function lastOctet(host){ const p=(host||'').trim().split('.'); const n=parseInt(p[p.length-1],10); return Number.isFinite(n)?n:null; }
+  function colorForHost(host){
+    const oct = lastOctet(host);
+    if (oct == null) return 'white';
+    if (ORANGE_OCTETS.has(oct)) return 'orange';
+    if (WHITE_OCTETS.has(oct)) return 'white';
+    if (BLACK_OCTETS.has(oct)) return 'black';
+    return 'white';
+  }
+  function isBoldHost(host){ const o=lastOctet(host); return o!=null && BOLD_OCTETS.has(o); }
+
+  function buildMenu(){
+    const menu = document.getElementById('serverMenu');
+    menu.innerHTML = '';
+    if (!servers.length){
+      const div = document.createElement('div');
+      div.className = 'item white';
+      div.innerHTML = '<span class="dot"></span><span class="text">No servers configured</span>';
+      div.style.cursor = 'not-allowed';
+      menu.appendChild(div);
+      return;
+    }
+    for (const s of servers){
+      const color = colorForHost(s.host);
+      const bold = isBoldHost(s.host);
+      const item = document.createElement('div');
+      item.className = `item ${color}`;
+      item.setAttribute('data-id', s.id);
+      item.innerHTML = `
+        <span class="dot"></span>
+        <span class="text ${bold ? 'bold' : ''}">${s.label || s.id}</span>
+      `;
+      item.onclick = () => selectServer(s.id);
+      menu.appendChild(item);
+    }
+  }
+
+  function applyTriggerAppearance(server){
+    const trig = document.getElementById('serverTrigger');
+    const labelEl = document.getElementById('triggerLabel');
+    trig.classList.remove('orange','white','black');
+    if (server){
+      const color = colorForHost(server.host);
+      trig.classList.add(color);
+      labelEl.textContent = server.label || server.id;
+    }else{
+      trig.classList.add('white');
+      labelEl.textContent = 'Select a server...';
+    }
+  }
+
+  function toggleMenu(){
+    const menu = document.getElementById('serverMenu');
+    menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
+  }
+  function closeMenu(){ document.getElementById('serverMenu').style.display = 'none'; }
+  function selectServer(id){
+    selectedServerId = id;
+    localStorage.setItem(LS_DEPLOY_SERVER, id);
+    const server = servers.find(s => s.id === id);
+    applyTriggerAppearance(server);
+    closeMenu();
+    populateProjects();
+  }
+  document.addEventListener('click', (e) => {
+    const wrap = document.getElementById('serverSelectWrap');
+    if (!wrap.contains(e.target)) closeMenu();
+  });
+
+  async function loadServers(){
+    try{
+      const r = await fetch(`${API_BASE}/deploy/servers`);
+      const d = await r.json();
+      servers = Array.isArray(d.servers) ? d.servers : [];
+      buildMenu();
+      const chosen = servers.find(s => s.id === selectedServerId) || null;
+      applyTriggerAppearance(chosen);
+    }catch(e){
+      servers = [];
+      buildMenu();
+      applyTriggerAppearance(null);
+    }
+  }
+
+  function setStatus(id, msg, kind='info'){
+    const el = document.getElementById(id);
+    el.textContent = msg || '';
+    el.className = 'status ' + (kind==='error'?'error':(kind==='ok'?'ok':''));
+  }
+  function getSelectedSubdir(){ return document.getElementById('projectSelect').value || ''; }
+  function updateDirectoryDisplay(){
+    const subdir = getSelectedSubdir();
+    document.getElementById('directory').value = subdir ? `${ROOT_BASE}/${subdir}` : '';
+  }
+  function reloadProjects(){ populateProjects(); }
+
+  async function populateProjects(){
+    const select = document.getElementById('projectSelect');
+    select.innerHTML = '<option value="">Loading...</option>';
+    setStatus('projectStatus','Loading projects...');
+    try{
+      const url = new URL(`${API_BASE}/list_projects`);
+      if (selectedServerId) url.searchParams.set('server_id', selectedServerId);
+      const resp = await fetch(url.toString());
+      const data = await resp.json();
+      select.innerHTML = '';
+      if (resp.ok && Array.isArray(data.projects) && data.projects.length){
+        for (const name of data.projects){
+          const opt = document.createElement('option');
+          opt.value = name; opt.textContent = name; select.appendChild(opt);
+        }
+        const saved = localStorage.getItem(LS_SELECTED_PROJECT);
+        if (saved && data.projects.includes(saved)) select.value = saved;
+        updateDirectoryDisplay();
+        setStatus('projectStatus',`Loaded ${data.projects.length} project(s).`,'ok');
+      }else{
+        select.innerHTML = '<option value="">No projects found</option>';
+        setStatus('projectStatus','No projects found.');
+      }
+    }catch(e){
+      select.innerHTML = '<option value="">Failed to load projects</option>';
+      setStatus('projectStatus','Failed to load projects: '+e,'error');
+    }
+    refreshScripts();
+  }
+
+  document.addEventListener('change',(e)=>{
+    if (e.target && e.target.id==='projectSelect'){
+      localStorage.setItem(LS_SELECTED_PROJECT, getSelectedSubdir());
+      updateDirectoryDisplay(); refreshScripts();
+      document.getElementById('resultBox').innerHTML = '';
+    }
+  });
+
+  async function listProjectDirectory(){
+    const subdir = getSelectedSubdir();
+    if (!subdir) return alert('Please select a project first.');
+    const outputEl = document.getElementById('output');
+    setPanel(outputEl, `Listing ${ROOT_BASE}/${subdir} ...`);
+    try{
+      const url = new URL(`${API_BASE}/list_directory`); 
+      url.searchParams.set('subdir', subdir);
+      if (selectedServerId) url.searchParams.set('server_id', selectedServerId);
+      const r = await fetch(url.toString()); const d = await r.json();
+      if (r.ok && Array.isArray(d.files)){
+        const list = `Directory: ${d.path}\n\n` + d.files.map(n=>`- ${n}`).join('\n');
+        setPanel(outputEl, list);
+      }else{
+        appendLines(outputEl, 'Error: '+(d.detail||'Failed to list directory'));
+      }
+    }catch(err){ appendLines(outputEl, 'Fetch error: '+err); }
+  }
+
+  async function refreshScripts(){
+    const subdir = getSelectedSubdir();
+    const select = document.getElementById('scriptsSelect');
+    select.innerHTML = '';
+    if (!subdir){ select.innerHTML = '<option value="">Select a project first</option>'; return; }
+    try{
+      const url = new URL(`${API_BASE}/list_directory`); 
+      url.searchParams.set('subdir', subdir);
+      if (selectedServerId) url.searchParams.set('server_id', selectedServerId);
+      const r = await fetch(url.toString()); const d = await r.json();
+      select.innerHTML = '';
+      if (r.ok && Array.isArray(d.files)){
+        const shFiles = d.files.filter(n=>n.toLowerCase().endsWith('.sh'));
+        if (shFiles.length){
+          for (const n of shFiles){ const o=document.createElement('option'); o.value=n; o.textContent=n; select.appendChild(o); }
+        }else{
+          select.innerHTML = '<option value="">No .sh scripts found in project root</option>';
+        }
+      }else{
+        select.innerHTML = '<option value="">Failed to load scripts</option>';
+      }
+    }catch(err){
+      select.innerHTML = '<option value="">Error loading scripts</option>';
+    }
+  }
+
+  async function runSelectedScript(){
+    const subdir = getSelectedSubdir();
+    const script = document.getElementById('scriptsSelect').value;
+    if (!subdir) return alert('Please select a project first.');
+    if (!script) return alert('Please select a script.');
+    await runScript(subdir, script);
+  }
+
+  async function quickRunSendRequest(){
+    const subdir = getSelectedSubdir();
+    if (!subdir) return alert('Please select a project first.');
+    await runScript(subdir, 'send_request.sh');
+  }
+
+  function normName(n){ return (n||'').toLowerCase().replace(/\.sh$/,'').replace(/[^a-z0-9]/g,''); }
+
+  async function runScript(subdir, scriptName){
+    const outputEl = document.getElementById('output');
+    setPanel(outputEl, `Running ${scriptName} in ${ROOT_BASE}/${subdir}...`);
+
+    // CSVolte auto-answer
+    const normScript = normName(scriptName);
+    const normProj = normName(subdir);
+    const isCsVolte = ['csvolte','csvoltedel'].includes(normScript) || (normScript==='sendrequest' && normProj==='csvoltedel');
+
+    let stdin_text;
+    if (isCsVolte){
+      const isPostpaid = document.getElementById('postpaidFlag').checked;
+      stdin_text = isPostpaid ? '1\n' : '0\n';
+    }
+
+    try{
+      const payload = { script_name: scriptName, subdir };
+      if (stdin_text !== undefined) payload.stdin_text = stdin_text;
+      if (selectedServerId) payload.server_id = selectedServerId;
+
+      const r = await fetch(`${API_BASE}/run_script`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const d = await r.json().catch(()=>({}));
+      if (r.ok){
+        if (d.output) appendLines(outputEl, d.output);
+        if (d.error)  appendLines(outputEl, d.error);
+        refreshResult();
+      }else{
+        appendLines(outputEl, 'Error: '+(d.detail||'Failed to run script'));
+      }
+    }catch(err){
+      appendLines(outputEl, 'Fetch error: '+err);
+    }
+  }
+
+  // Input save / clear
+  async function writeData(){
+    const subdir = getSelectedSubdir();
+    const data = document.getElementById('dataInput').value;
+    if (!subdir) return alert('Please select a project first.');
+    if (!data) return alert('Please enter some data');
+    setStatus('writeStatus','Writing data...');
+    try{
+      const payload = { data, subdir };
+      if (selectedServerId) payload.server_id = selectedServerId;
+      const r = await fetch(`${API_BASE}/write_input`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      const d = await r.json();
+      if (d.success){ setStatus('writeStatus','Data written successfully.','ok'); document.getElementById('dataInput').value=''; }
+      else{ setStatus('writeStatus','Error: '+(d.error||'Failed to write data'),'error'); }
+    }catch(err){ setStatus('writeStatus','Failed to write data: '+err,'error'); }
+  }
+
+  async function clearInput(){
+    const subdir = getSelectedSubdir();
+    if (!subdir) return alert('Please select a project first.');
+    if (!confirm("Clear the contents of the 'input' file?")) return;
+    setStatus('writeStatus','Clearing input...');
+    try{
+      const payload = { subdir };
+      if (selectedServerId) payload.server_id = selectedServerId;
+      const r = await fetch(`${API_BASE}/clear_input`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      const d = await r.json();
+      if (r.ok && d.success){ setStatus('writeStatus','Input cleared.','ok'); document.getElementById('dataInput').value=''; }
+      else{ setStatus('writeStatus','Failed to clear input: '+(d.error||'Unknown error'),'error'); }
+    }catch(err){ setStatus('writeStatus','Request failed: '+err,'error'); }
+  }
+
+  async function showHint(){
+    const subdir = getSelectedSubdir();
+    if (!subdir) return alert('Please select a project first.');
+    try{
+      const url = new URL(`${API_BASE}/hint`); 
+      url.searchParams.set('subdir', subdir);
+      if (selectedServerId) url.searchParams.set('server_id', selectedServerId);
+      const r = await fetch(url.toString()); const d = await r.json();
+      alert(r.ok ? (d.content||'(empty)') : 'No hint found.');
+    }catch(e){ alert('Failed to load hint: '+e); }
+  }
+
+  // Results panel (highlighted)
+  async function refreshResult(){
+    const subdir = getSelectedSubdir(); if (!subdir) return;
+    const box = document.getElementById('resultBox'); box.innerHTML='';
+    try{
+      const url = new URL(`${API_BASE}/result`); 
+      url.searchParams.set('subdir', subdir); url.searchParams.set('tail','500');
+      if (selectedServerId) url.searchParams.set('server_id', selectedServerId);
+      const r = await fetch(url.toString()); const d = await r.json();
+      const content = (r.ok && typeof d.content==='string') ? (d.content||'(empty)') : 'No results.txt found.';
+      setPanel(box, content);
+    }catch(e){ setPanel(box, 'Failed to load results.txt: ' + e); }
+  }
+
+  async function clearResults(){
+    const subdir = getSelectedSubdir();
+    if (!subdir) { alert('Please select a project first.'); return; }
+    if (!confirm('Clear the contents of results.txt?')) return;
+    try{
+      const payload = { subdir };
+      if (selectedServerId) payload.server_id = selectedServerId;
+      const response = await fetch(`${API_BASE}/clear_result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json().catch(()=>({}));
+      if (response.ok && data.success){
+        alert('results.txt cleared.');
+        refreshResult();
+      }else{
+        alert('Failed to clear results: ' + (data.error || data.detail || 'Unknown error'));
+      }
+    }catch(e){ alert('Request failed: ' + e); }
+  }
+
+  function clearOutput(){ document.getElementById('output').innerHTML=''; }
+  async function copyOutput(){
+    try{ await navigator.clipboard.writeText(document.getElementById('output').textContent); alert('Output copied to clipboard'); }
+    catch{ alert('Failed to copy output'); }
+  }
+
+  document.addEventListener('DOMContentLoaded', async ()=>{ 
+    await loadServers(); 
+    await populateProjects(); 
+  });
+
+  function toggleMenu(){ 
+    const menu = document.getElementById('serverMenu');
+    menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
+  }
+  </script>
+</body>
+</html>

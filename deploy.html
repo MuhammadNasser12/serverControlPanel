@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Deploy Center</title>
+  <style>
+    :root{--bg:#f6f7f9;--card:#fff;--text:#0f1115;--muted:#6b7280;--border:#e5e7eb;--accent:#ff6a00;--black:#0b0c0f}
+    *{box-sizing:border-box}html,body{height:100%}
+    body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,"Noto Sans";background:var(--bg);color:var(--text)}
+    .app-header{background:var(--black);color:#fff;padding:18px 20px}
+    .container{max-width:1100px;margin:24px auto;padding:0 16px}
+    .card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+    .row{margin-bottom:12px}
+    label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .btn{appearance:none;border:1px solid transparent;background:#f3f4f6;color:#111;padding:10px 14px;border-radius:10px;font-weight:600;cursor:pointer}
+    .btn-outline{background:#fff;color:#ff6a00;border-color:#ff6a00}
+    #logs{background:#0f1115;color:#e5e7eb;border-radius:12px;padding:14px;height:420px;overflow:auto;border:1px solid #1f232a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Courier New",monospace;font-size:13px}
+    .logline{white-space:pre-wrap}
+    .hl-bad{background:#3a0d12;color:#ffb4b4;border-left:4px solid #ef4444;padding-left:8px;border-radius:4px}
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div style="max-width:1100px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#ff6a00,#ffa366);display:grid;place-items:center;font-weight:800;color:#111;">CO</div>
+        <div style="font-weight:800;">Deploy Center</div>
+      </div>
+      <a href="index.html" class="btn btn-outline">Back to Console</a>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h3 style="margin-top:0;">Server</h3>
+      <div class="row">
+        <label for="serverSelect">Server (from servers.txt)</label>
+        <select id="serverSelect" style="min-width:280px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:10px;"></select>
+        <button class="btn" type="button" onclick="testConnection()">Test connection</button>
+        <button class="btn" type="button" onclick="runNode('status')">Status</button>
+        <button class="btn" type="button" onclick="runNode('start')">Start</button>
+        <button class="btn" type="button" onclick="runNode('stop')">Stop</button>
+        <button class="btn btn-outline" type="button" onclick="backupCfg()">Backup</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin-top:0;">Shipments</h3>
+      <div class="row">
+        <label for="shipmentSelect">Shipment .zip</label>
+        <div class="toolbar">
+          <select id="shipmentSelect" style="min-width:420px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:10px;"></select>
+          <label style="font-size:12px;color:#6b7280">Days</label>
+          <select id="shipDays" style="padding:8px 10px;border:1px solid #e5e7eb;border-radius:10px;">
+            <option value="10">10</option>
+            <option value="30" selected>30</option>
+            <option value="90">90</option>
+            <option value="365">365</option>
+            <option value="0">All</option>
+          </select>
+          <button class="btn" type="button" onclick="loadShipments()">Refresh</button>
+          <button class="btn btn-outline" type="button" onclick="deploySelected()">Deploy</button>
+          <button class="btn btn-outline" type="button" onclick="rollbackSelected()">Rollback</button>
+          <button class="btn btn-outline" type="button" onclick="importLatest()">Import</button>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#6b7280">
+        Import pulls the newest .zip from 10.11.116.40:/home/bullkpsa_G2R0C0/ATOS_Delivery and copies it to /home/bullkpsa_G2R0C0 on every server in servers.txt (in parallel).
+      </div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin-top:0;">Logs</h3>
+      <pre id="logs"></pre>
+    </section>
+  </main>
+
+  <script>
+    const API_BASE = 'http://127.0.0.1:8000';
+    const LS_DEPLOY_SERVER = 'deploySelectedServerId';
+    let servers = [];
+    let selectedServerId = localStorage.getItem(LS_DEPLOY_SERVER) || '';
+    let es = null;
+
+    function toPlain(s){
+      s = String(s ?? '');
+      s = s.replace(/(?:\x1B[@-Z\\-_]|\x1B\[[0-?]*[ -/]*[@-~]|\x9B[0-?]*[ -/]*[@-~]|\x1B\][^\x1B\x07]*(?:\x1B\\|\x07)|\x1B[P^_][^\x1B]*(?:\x1B\\)|\x1B\\)/g,'');
+      s = s.replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g,'');
+      return s;
+    }
+    function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+    const RX_KO = /(^|[^A-Za-z0-9_])KO([^A-Za-z0-9_]|$)/i;
+    const RX_OSD = /(^|[^A-Za-z0-9_])OS_Disabled([^A-Za-z0-9_]|$)/i;
+    function shouldHighlight(line){
+      const clean = toPlain(line);
+      return RX_KO.test(clean) || RX_OSD.test(clean);
+    }
+
+    function logLine(text){
+      const el = document.getElementById('logs');
+      const clean = toPlain(text).replace(/\r\n?/g,'\n');
+      const lines = clean.split('\n');
+      let html = '';
+      for (const ln of lines){
+        if (ln === '') { html += '<div class="logline">&nbsp;</div>'; continue; }
+        const cls = shouldHighlight(ln) ? 'logline hl-bad' : 'logline';
+        html += `<div class="${cls}">${escapeHtml(ln)}</div>`;
+      }
+      el.insertAdjacentHTML('beforeend', html);
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function closeStream(){ if (es){ try{ es.close(); }catch(_){} es = null; } }
+
+    async function loadServers(){
+      const sel = document.getElementById('serverSelect'); sel.innerHTML = '<option>Loading...</option>';
+      try{
+        const r = await fetch(`${API_BASE}/deploy/servers`);
+        const d = await r.json();
+        servers = Array.isArray(d.servers) ? d.servers : [];
+        sel.innerHTML = '';
+        for (const s of servers){
+          const o = document.createElement('option'); o.value = s.id; o.textContent = s.label || s.id; sel.appendChild(o);
+        }
+        if (selectedServerId && servers.some(s=>s.id===selectedServerId)){
+          sel.value = selectedServerId;
+        }else if (servers.length){
+          selectedServerId = servers[0].id;
+          sel.value = selectedServerId;
+          localStorage.setItem(LS_DEPLOY_SERVER, selectedServerId);
+        }
+      }catch(e){
+        sel.innerHTML = '<option>Failed to load servers</option>';
+        logLine('Failed to load servers: ' + e);
+      }
+    }
+
+    document.addEventListener('change',(e)=>{
+      if (e.target && e.target.id === 'serverSelect'){
+        selectedServerId = e.target.value || '';
+        localStorage.setItem(LS_DEPLOY_SERVER, selectedServerId);
+        loadShipments();
+      }
+    });
+
+    async function testConnection(){
+      const id = selectedServerId;
+      if (!id) return alert('Please select a server.');
+      logLine(`Testing connection to ${id} ...`);
+      try{
+        const url = new URL(`${API_BASE}/deploy/test_connection`); url.searchParams.set('server_id', id);
+        const r = await fetch(url.toString()); const d = await r.json().catch(()=>({}));
+        if (d.output) logLine(d.output.trim());
+        if (d.error)  logLine(d.error.trim());
+        logLine(d.ok ? '[OK]' : '[FAILED]');
+      }catch(e){ logLine('Connection test error: ' + e); }
+    }
+
+    async function loadShipments(){
+      const id = selectedServerId;
+      const sel = document.getElementById('shipmentSelect');
+      const days = Number(document.getElementById('shipDays').value || 30);
+      sel.innerHTML = '<option>Loading...</option>';
+      if (!id){ sel.innerHTML = '<option>Select a server first</option>'; return; }
+      try{
+        const url = new URL(`${API_BASE}/deploy/shipments`);
+        url.searchParams.set('server_id', id);
+        url.searchParams.set('days', String(days));
+        const r = await fetch(url.toString());
+        const d = await r.json().catch(()=>({}));
+        sel.innerHTML = '';
+        const arr = Array.isArray(d.shipments) ? d.shipments : [];
+        if (!arr.length){
+          sel.innerHTML = '<option value="">No ZIPs found in selected window</option>';
+          if (d.debug){ logLine(`No ZIPs. dir=${d.debug.dir}, days=${d.debug.days}, scanned=${d.debug.scanned}, zip_seen=${d.debug.zip_seen}`); }
+          return;
+        }
+        for (const it of arr){
+          const o = document.createElement('option');
+          o.value = it.name;
+          o.textContent = `${it.name} — ${it.mtime}`;
+          sel.appendChild(o);
+        }
+      }catch(e){
+        sel.innerHTML = '<option>Failed to load shipments</option>';
+        logLine('Failed to load shipments: ' + e);
+      }
+    }
+
+    function deploySelected(){
+      const id = selectedServerId; if (!id) return alert('Please select a server.');
+      const sel = document.getElementById('shipmentSelect');
+      const name = sel.value || '';
+      if (!name || name === 'Loading...' || name === 'No ZIPs found in selected window'){
+        return alert('Please select a shipment .zip');
+      }
+      closeStream();
+      logLine(`$ deploy ${name}`);
+      const url = new URL(`${API_BASE}/deploy/deploy_shipment`); url.searchParams.set('server_id', id); url.searchParams.set('name', name);
+      es = new EventSource(url);
+      es.onmessage = (ev) => { if (typeof ev.data === 'string' && ev.data.length){ logLine(ev.data); } };
+      es.onerror = () => { logLine('[stream closed]'); closeStream(); };
+    }
+
+    function rollbackSelected(){
+      const id = selectedServerId; if (!id) return alert('Please select a server.');
+      const sel = document.getElementById('shipmentSelect');
+      const name = sel.value || '';
+      if (!name || name === 'Loading...' || name === 'No ZIPs found in selected window'){
+        return alert('Please select a shipment .zip');
+      }
+      closeStream();
+      logLine(`$ rollback ${name}`);
+      const url = new URL(`${API_BASE}/deploy/rollback_shipment`); url.searchParams.set('server_id', id); url.searchParams.set('name', name);
+      es = new EventSource(url);
+      es.onmessage = (ev) => { if (typeof ev.data === 'string' && ev.data.length){ logLine(ev.data); } };
+      es.onerror = () => { logLine('[stream closed]'); closeStream(); };
+    }
+
+    function importLatest(){
+      closeStream();
+      logLine('$ import latest (parallel) from 10.11.116.40');
+      const url = new URL(`${API_BASE}/deploy/import_latest_shipment`);
+      es = new EventSource(url);
+      es.onmessage = (ev) => { if (typeof ev.data === 'string' && ev.data.length){ logLine(ev.data); } };
+      es.onerror = () => { logLine('[stream closed]'); closeStream(); };
+    }
+
+    function runNode(action){
+      const id = selectedServerId; if (!id) return alert('Please select a server.');
+      closeStream();
+      const pretty = action==='stop' ? 'kpsa.ksh -stop force' : action==='start' ? 'kpsa.ksh -start' : 'kpsa.ksh -status';
+      logLine(`$ ${pretty}`);
+      const url = new URL(`${API_BASE}/deploy/node_cmd`); url.searchParams.set('server_id', id); url.searchParams.set('action', action);
+      es = new EventSource(url);
+      es.onmessage = (ev) => { if (typeof ev.data === 'string' && ev.data.length){ logLine(ev.data); } };
+      es.onerror = () => { logLine('[stream closed]'); closeStream(); };
+    }
+
+    async function backupCfg(){
+      const id = selectedServerId; if (!id) return alert('Please select a server.');
+      logLine(`$ backup cfg on ${id}`);
+      try{
+        const r = await fetch(`${API_BASE}/deploy/backup_cfg`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ server_id: id })
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok){
+          logLine(`[FAILED] ${d.detail || r.statusText}`);
+          return;
+        }
+        logLine(`server_time: ${d.server_time} | dest: ${d.dest_dir}`);
+        if (Array.isArray(d.copies)){
+          for (const c of d.copies){
+            const ok = c.ok ? 'OK' : 'FAIL';
+            logLine(` - ${ok}: ${c.src} -> ${c.dst}`);
+            if (c.error) logLine(`   err: ${c.error}`);
+            if (c.output) logLine(`   out: ${c.output}`);
+          }
+        }
+        logLine(d.success ? '[DONE]' : '[DONE with errors]');
+      }catch(e){
+        logLine('[error] ' + e);
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => { await loadServers(); await loadShipments(); });
+    window.addEventListener('beforeunload', closeStream);
+  </script>
+</body>
+</html>

@@ -1,0 +1,732 @@
+import os
+import io
+import re
+import time
+import json
+import shlex
+import posixpath
+import stat
+from typing import Optional, List, Tuple, Dict, Any
+from random import randint
+
+import paramiko
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+app = FastAPI(title="Remote Script Control")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # TODO: restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =================== Configuration (local) ===================
+
+CONFIG_PATH = os.getenv("APP_CONFIG", "config.json")
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "defaults": {
+        "hint_candidates": ["readme", "readme.txt", "README", "README.txt"],
+        "result_candidates": ["results.txt", "results", "RESULTS.txt", "RESULTS"],
+        "timeout": 900,
+        "env": {},
+        "args_template": None,
+        "pre_write_input": False,
+        "input_template": None,
+        "input_values_file": None
+    },
+    "projects": {}
+}
+
+def load_local_config() -> Dict[str, Any]:
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if "defaults" not in cfg or not isinstance(cfg["defaults"], dict):
+            cfg["defaults"] = DEFAULT_CONFIG["defaults"]
+        if "projects" not in cfg or not isinstance(cfg["projects"], dict):
+            cfg["projects"] = {}
+        return cfg
+    except FileNotFoundError:
+        return DEFAULT_CONFIG.copy()
+    except Exception:
+        return DEFAULT_CONFIG.copy()
+
+def dict_merge(base: Dict[str, Any], extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    out = dict(base or {})
+    if extra:
+        for k, v in extra.items():
+            if k == "env" and isinstance(v, dict):
+                env = dict(out.get("env", {}))
+                env.update(v)
+                out["env"] = env
+            else:
+                out[k] = v
+    return out
+
+def get_project_settings(cfg: Dict[str, Any], project: str) -> Dict[str, Any]:
+    projects = cfg.get("projects", {})
+    return projects.get(project, {}) if isinstance(projects.get(project), dict) else {}
+
+def get_script_overrides(cfg: Dict[str, Any], project: str, script: str) -> Dict[str, Any]:
+    projects = cfg.get("projects", {})
+    wild = (projects.get("*", {}) or {}).get("scripts", {})
+    proj = (projects.get(project, {}) or {}).get("scripts", {})
+    ov = {}
+    if isinstance(wild, dict) and script in wild:
+        ov = dict_merge(ov, wild[script])
+    if isinstance(proj, dict) and script in proj:
+        ov = dict_merge(ov, proj[script])
+    return ov
+
+def get_effective_rule(cfg: Dict[str, Any], project: str, script: str) -> Dict[str, Any]:
+    defaults = cfg.get("defaults", DEFAULT_CONFIG["defaults"])
+    rule = get_script_overrides(cfg, project, script)
+    return dict_merge(defaults, rule)
+
+# =================== Remote environment ===================
+
+SSH_HOST = os.getenv("SSH_HOST", "10.11.116.40")
+SSH_PORT = int(os.getenv("SSH_PORT", "22"))
+SSH_USERNAME = os.getenv("SSH_USERNAME", "bullkpsa_G2R0C0")
+SSH_PASSWORD = os.getenv("SSH_PASSWORD", "bullkpsa_G2R0C001")
+
+SSH_PRIVATE_KEY = os.getenv("SSH_PRIVATE_KEY")
+SSH_PRIVATE_KEY_PASSPHRASE = os.getenv("SSH_PRIVATE_KEY_PASSPHRASE")
+
+ROOT_BASE_DIR = "/home/bullkpsa_G2R0C0/users/naser"
+LAST_RUN_STATE = ".last_run.json"
+
+def load_private_key(pem: str, passphrase: Optional[str]) -> paramiko.PKey:
+    for key_cls in (paramiko.RSAKey, paramiko.ECDSAKey, paramiko.Ed25519Key):
+        try:
+            return key_cls.from_private_key(io.StringIO(pem), password=passphrase)
+        except Exception:
+            continue
+    raise ValueError("Unsupported or invalid private key")
+
+def ssh_client() -> paramiko.SSHClient:
+    if not SSH_USERNAME or (not SSH_PASSWORD and not SSH_PRIVATE_KEY):
+        raise HTTPException(status_code=500, detail="SSH credentials are not configured")
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        if SSH_PRIVATE_KEY:
+            pkey = load_private_key(SSH_PRIVATE_KEY, SSH_PRIVATE_KEY_PASSPHRASE)
+            client.connect(
+                SSH_HOST,
+                port=SSH_PORT,
+                username=SSH_USERNAME,
+                pkey=pkey,
+                look_for_keys=False,
+                allow_agent=False,
+                timeout=15,
+            )
+        else:
+            client.connect(
+                SSH_HOST,
+                port=SSH_PORT,
+                username=SSH_USERNAME,
+                password=SSH_PASSWORD,
+                look_for_keys=False,
+                allow_agent=False,
+                timeout=15,
+            )
+        return client
+    except Exception as e:
+        client.close()
+        raise HTTPException(status_code=502, detail=f"SSH connection failed: {e}")
+
+def ensure_within_root(path: str) -> str:
+    normalized = posixpath.normpath(path)
+    root = ROOT_BASE_DIR.rstrip("/")
+    if normalized == root or normalized.startswith(root + "/"):
+        return normalized
+    raise HTTPException(status_code=403, detail="Path outside allowed root directory")
+
+def base_for_subdir(subdir: str, sftp: Optional[paramiko.SFTPClient] = None) -> str:
+    if not subdir or "/" in subdir or "\\" in subdir or ".." in subdir:
+        raise HTTPException(status_code=400, detail="Invalid subdir name")
+    base = ensure_within_root(posixpath.join(ROOT_BASE_DIR, subdir))
+    if sftp:
+        try:
+            st = sftp.stat(base)
+            if not stat.S_ISDIR(st.st_mode):
+                raise HTTPException(status_code=400, detail="subdir is not a directory")
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="subdir not found")
+    return base
+
+def ensure_within_base(base_dir: str, path: str) -> str:
+    if not path.startswith("/"):
+        path = posixpath.join(base_dir, path)
+    normalized = posixpath.normpath(path)
+    base_norm = base_dir.rstrip("/")
+    if normalized == base_norm or normalized.startswith(base_norm + "/"):
+        return normalized
+    raise HTTPException(status_code=403, detail="Path outside selected subdir")
+
+def ssh_exec(client: paramiko.SSHClient, command: str, timeout: int = 600, stdin_data: Optional[str] = None):
+    stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    if stdin_data is not None:
+        try:
+            data = stdin_data
+            if data and not data.endswith("\n"):
+                data += "\n"
+            stdin.write(data)
+            stdin.flush()
+        except Exception:
+            pass
+    out = stdout.read().decode("utf-8", errors="replace")
+    err = stderr.read().decode("utf-8", errors="replace")
+    exit_status = stdout.channel.recv_exit_status()
+    return out, err, exit_status
+
+def ssh_exec_interactive_autopass(
+    client: paramiko.SSHClient,
+    command: str,
+    timeout: int,
+    password: str,
+    prompt_patterns: List[str],
+    max_injections: int = 20,
+    pre_stdin: Optional[str] = None
+) -> Tuple[str, str, int]:
+    """
+    Execute a command with a PTY and automatically send `password` (or any answer)
+    whenever prompt_patterns match. Optionally send pre_stdin at start.
+    """
+    stdin, stdout, stderr = client.exec_command(command, timeout=timeout, get_pty=True)
+    channel = stdout.channel
+    regs = [re.compile(p, re.IGNORECASE) for p in (prompt_patterns or [])]
+    out_buf = ""
+    err_buf = ""
+    scan_buf = ""
+    injections = 0
+
+    if pre_stdin is not None:
+        try:
+            data = pre_stdin
+            if data and not data.endswith("\n"):
+                data += "\n"
+            stdin.write(data)
+            stdin.flush()
+        except Exception:
+            pass
+
+    start = time.time()
+    while True:
+        if channel.exit_status_ready():
+            while channel.recv_ready():
+                chunk = channel.recv(4096).decode("utf-8", errors="replace")
+                out_buf += chunk
+                scan_buf = (scan_buf + chunk)[-2048:]
+            while channel.recv_stderr_ready():
+                chunk = channel.recv_stderr(4096).decode("utf-8", errors="replace")
+                err_buf += chunk
+                scan_buf = (scan_buf + chunk)[-2048:]
+            break
+
+        if channel.recv_ready():
+            chunk = channel.recv(4096).decode("utf-8", errors="replace")
+            out_buf += chunk
+            scan_buf = (scan_buf + chunk)[-2048:]
+
+        if channel.recv_stderr_ready():
+            chunk = channel.recv_stderr(4096).decode("utf-8", errors="replace")
+            err_buf += chunk
+            scan_buf = (scan_buf + chunk)[-2048:]
+
+        if regs and injections < max_injections and scan_buf:
+            try:
+                if any(r.search(scan_buf) for r in regs):
+                    stdin.write(password + "\n")
+                    stdin.flush()
+                    injections += 1
+                    scan_buf = ""
+            except Exception:
+                pass
+
+        if time.time() - start > timeout:
+            try:
+                channel.close()
+            except Exception:
+                pass
+            raise HTTPException(status_code=504, detail="Command timed out during interactive execution")
+
+        time.sleep(0.05)
+
+    exit_status = channel.recv_exit_status()
+    return out_buf, err_buf, exit_status
+
+# =================== Helpers ===================
+
+def read_json_file(client: paramiko.SSHClient, path: str) -> Optional[dict]:
+    sftp = client.open_sftp()
+    try:
+        with sftp.file(path, "r") as f:
+            data = f.read(256 * 1024).decode("utf-8", errors="replace")
+            return json.loads(data)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+    finally:
+        sftp.close()
+
+def write_text_file(client: paramiko.SSHClient, path: str, content: str):
+    sftp = client.open_sftp()
+    try:
+        with sftp.file(path, "w") as f:
+            f.write(content)
+    finally:
+        sftp.close()
+
+def append_text_file(client: paramiko.SSHClient, path: str, content: str):
+    sftp = client.open_sftp()
+    try:
+        try:
+            with sftp.file(path, "a") as f:
+                f.write(content)
+        except FileNotFoundError:
+            with sftp.file(path, "w") as f:
+                f.write(content)
+    finally:
+        sftp.close()
+
+def save_last_run(client: paramiko.SSHClient, base_dir: str, script_name: str):
+    state_path = posixpath.join(base_dir, LAST_RUN_STATE)
+    write_text_file(client, state_path, json.dumps({"script": script_name}, ensure_ascii=False))
+
+def load_last_run(client: paramiko.SSHClient, base_dir: str) -> Optional[str]:
+    state_path = posixpath.join(base_dir, LAST_RUN_STATE)
+    data = read_json_file(client, state_path)
+    return (data or {}).get("script")
+
+def _rand_digits(n: int) -> str:
+    if n <= 0:
+        return ""
+    first = str(randint(1, 9))
+    if n == 1:
+        return first
+    rest = "".join(str(randint(0, 9)) for _ in range(n - 1))
+    return first + rest
+
+def _norm_name(name: str) -> str:
+    n = (name or "").lower()
+    if n.endswith(".sh"):
+        n = n[:-3]
+    return re.sub(r"[^a-z0-9]", "", n)
+
+# =================== API: list / browse ===================
+
+@app.get("/list_projects")
+def list_projects():
+    client = ssh_client()
+    try:
+        sftp = client.open_sftp()
+        try:
+            entries = []
+            for attr in sftp.listdir_attr(ROOT_BASE_DIR):
+                name = attr.filename
+                if name in (".", ".."):
+                    continue
+                if stat.S_ISDIR(attr.st_mode):
+                    entries.append(name)
+            entries.sort()
+            return {"projects": entries}
+        finally:
+            sftp.close()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Root directory not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        client.close()
+
+@app.get("/list_directory")
+def list_directory(
+    subdir: str = Query(..., description="Subdirectory under the root"),
+    path: Optional[str] = Query(None, description="Optional path inside the subdir")
+):
+    client = ssh_client()
+    try:
+        sftp = client.open_sftp()
+        try:
+            base_dir = base_for_subdir(subdir, sftp)
+            target = base_dir if not path else ensure_within_base(base_dir, path)
+            entries = sorted(sftp.listdir(target))
+            return {"path": target, "files": entries}
+        finally:
+            sftp.close()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Directory not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        client.close()
+
+# =================== API: run_script ===================
+
+class ScriptRequest(BaseModel):
+    script_name: str
+    subdir: str
+    stdin_text: Optional[str] = None  # optional answer (1/0)
+
+@app.post("/run_script")
+def run_script(request: ScriptRequest):
+    if not request.script_name:
+        raise HTTPException(status_code=400, detail="script_name is required")
+
+    cfg = load_local_config()
+    project = request.subdir
+    script_name_in = posixpath.basename(request.script_name)
+    rule = get_effective_rule(cfg, project, script_name_in)
+
+    client = ssh_client()
+    try:
+        sftp = client.open_sftp()
+        try:
+            base_dir = base_for_subdir(project, sftp)
+        finally:
+            sftp.close()
+
+        script_path = ensure_within_base(base_dir, request.script_name)
+        script_dir = posixpath.dirname(script_path)
+        script_base = posixpath.basename(script_path)
+
+        # Optional pre-write input from template
+        if rule.get("pre_write_input"):
+            input_template = rule.get("input_template") or ""
+            values: Dict[str, Any] = {}
+            values_file = rule.get("input_values_file")
+            if values_file:
+                params_path = ensure_within_base(base_dir, values_file)
+                vals = read_json_file(client, params_path)
+                if isinstance(vals, dict):
+                    values.update(vals)
+            try:
+                rendered = input_template.format(**{k: "" if v is None else v for k, v in values.items()})
+            except KeyError as ke:
+                raise HTTPException(status_code=400, detail=f"Missing input value for {ke}")
+            rendered = rendered.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+            write_text_file(client, posixpath.join(base_dir, "input"), rendered)
+
+        # Build template context
+        ctx: Dict[str, Any] = {"script": script_base}
+        if isinstance(rule.get("vars"), dict):
+            for k, v in rule["vars"].items():
+                ctx[k] = v
+
+        # Add random_ids (e.g., REQUEST_ID)
+        random_specs = rule.get("random_ids") or []
+        if isinstance(random_specs, list):
+            for spec in random_specs:
+                try:
+                    name = spec.get("name")
+                    digits = int(spec.get("digits", 0))
+                except Exception:
+                    name, digits = None, 0
+                if name and digits > 0:
+                    ctx[name] = _rand_digits(digits)
+
+        # Build command
+        args_template = rule.get("args_template")
+        if args_template:
+            try:
+                cmd_line = args_template.format(**ctx)
+            except KeyError as ke:
+                raise HTTPException(status_code=500, detail=f"args_template missing key: {ke}")
+        else:
+            cmd_line = f"./{posixpath.basename(script_path)}"
+
+        env_vars = rule.get("env") or {}
+        env_prefix = " ".join(f"{shlex.quote(k)}={shlex.quote(str(v))}" for k, v in env_vars.items())
+        env_prefix = (env_prefix + " ") if env_prefix else ""
+        inner = f"cd {shlex.quote(script_dir)} && {env_prefix}{cmd_line}"
+        cmd = f"bash -lc {shlex.quote(inner)}"
+        timeout = int(rule.get("timeout") or 900)
+
+        # Decide execution mode
+        auto_pass = rule.get("auto_password") or {}
+        if bool(auto_pass.get("enabled")):
+            password = str(auto_pass.get("value", ""))
+            if not password:
+                raise HTTPException(status_code=500, detail="auto_password enabled but no value provided")
+            patterns = auto_pass.get("patterns") or [r"[Pp]assword:"]
+            max_times = int(auto_pass.get("max_times") or 20)
+            out, err, code = ssh_exec_interactive_autopass(
+                client, cmd, timeout, password, patterns, max_injections=max_times, pre_stdin=request.stdin_text
+            )
+        else:
+            # CSVOLTE_del auto-answer (CSVOLTE_del.sh or send_request.sh inside CSVOLTE_del)
+            norm_script = _norm_name(script_base)
+            norm_proj = _norm_name(project)
+            csv_trigger = (
+                norm_script in {"csvolte", "csvoltedel"} or
+                (norm_script == "sendrequest" and norm_proj == "csvoltedel")
+            )
+            if csv_trigger:
+                ans = (request.stdin_text or "0").strip()
+                if ans not in ("0", "1"):
+                    ans = "0"
+                patterns = [
+                    r"(?i)postpaid",
+                    r"(?i)enter.*postpaid",
+                    r"(?i)\benter\b.*\b1\b",
+                    r"(?i)choice",
+                    r":\s*$"
+                ]
+                out, err, code = ssh_exec_interactive_autopass(
+                    client,
+                    cmd,
+                    timeout=timeout,
+                    password=ans,
+                    prompt_patterns=patterns,
+                    max_injections=10,
+                    pre_stdin=ans
+                )
+            else:
+                out, err, code = ssh_exec(client, cmd, timeout=timeout, stdin_data=request.stdin_text)
+
+        # Save last run
+        try:
+            save_last_run(client, base_dir, posixpath.basename(script_path))
+        except Exception:
+            pass
+
+        # Post-append result line if configured
+        post_tpl = rule.get("post_append_result_template")
+        if post_tpl:
+            try:
+                line = post_tpl.format(**ctx)
+            except KeyError as ke:
+                line = f"APPEND_ERROR missing {ke}\n"
+            defaults = cfg.get("defaults", {})
+            candidates = rule.get("result_candidates") or defaults.get("result_candidates") or DEFAULT_CONFIG["defaults"]["result_candidates"]
+            result_file = rule.get("result_file") or (candidates[0] if candidates else "results.txt")
+            result_path = ensure_within_base(base_dir, result_file)
+            append_text_file(client, result_path, line if line.endswith("\n") else line + "\n")
+
+        if code != 0:
+            raise HTTPException(status_code=500, detail=err or f"Script exited with {code}")
+        return {"output": out, "error": err}
+    finally:
+        client.close()
+
+# =================== API: write_input ===================
+
+class InputData(BaseModel):
+    data: str
+    subdir: str
+
+@app.post("/write_input")
+def write_input(request: InputData):
+    cfg = load_local_config()
+    project = request.subdir
+
+    client = ssh_client()
+    try:
+        sftp = client.open_sftp()
+        try:
+            base_dir = base_for_subdir(project, sftp)
+            remote_path = posixpath.join(base_dir, "input")
+            text = request.data or ""
+            text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+            with sftp.file(remote_path, "w") as f:
+                f.write(text)
+        finally:
+            sftp.close()
+
+        proj_settings = get_project_settings(cfg, project)
+        post_cmd = proj_settings.get("post_write_input_command")
+        if post_cmd:
+            inner = f"cd {shlex.quote(base_dir)} && {post_cmd}"
+            cmd = f"bash -lc {shlex.quote(inner)}"
+            out, err, code = ssh_exec(client, cmd, timeout=60)
+            if code != 0:
+                raise HTTPException(status_code=500, detail=err or f"post_write_input_command exited with {code}")
+
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        client.close()
+
+# =================== API: hint / result ===================
+
+def _read_first_existing_file(
+    client: paramiko.SSHClient,
+    base_dir: str,
+    candidates: List[str],
+    max_bytes: int = 256 * 1024
+) -> Tuple[str, str, bool, str]:
+    sftp = client.open_sftp()
+    try:
+        for name in candidates:
+            if not name or "/" in name or "\\" in name or ".." in name:
+                continue
+            path = ensure_within_base(base_dir, name)
+            try:
+                with sftp.file(path, "r") as f:
+                    data = f.read(max_bytes + 1)
+                    truncated = len(data) > max_bytes
+                    if truncated:
+                        data = data[:max_bytes]
+                    content = data.decode("utf-8", errors="replace")
+                    return name, path, truncated, content
+            except FileNotFoundError:
+                continue
+        raise HTTPException(status_code=404, detail="File not found")
+    finally:
+        sftp.close()
+
+@app.get("/hint")
+def get_hint(
+    subdir: str,
+    filename: Optional[str] = Query(None),
+    max_bytes: int = Query(256 * 1024, ge=1, le=5 * 1024 * 1024),
+):
+    cfg = load_local_config()
+    client = ssh_client()
+    try:
+        sftp = client.open_sftp()
+        try:
+            base_dir = base_for_subdir(subdir, sftp)
+        finally:
+            sftp.close()
+
+        if filename:
+            candidates = [filename]
+        else:
+            defaults = cfg.get("defaults", {})
+            base_candidates = defaults.get("hint_candidates") or DEFAULT_CONFIG["defaults"]["hint_candidates"]
+            last_script = load_last_run(client, base_dir)
+            if last_script:
+                rule = get_effective_rule(cfg, subdir, last_script)
+                if rule.get("hint_file"):
+                    candidates = [rule["hint_file"]]
+                elif rule.get("hint_candidates"):
+                    candidates = [c for c in rule["hint_candidates"] if c]
+                else:
+                    candidates = [c for c in base_candidates if c]
+            else:
+                candidates = [c for c in base_candidates if c]
+
+        name, path, truncated, content = _read_first_existing_file(client, base_dir, candidates, max_bytes)
+        return {"file": name, "path": path, "truncated": truncated, "content": content}
+    finally:
+        client.close()
+
+@app.get("/result")
+def get_result(
+    subdir: str,
+    filename: Optional[str] = Query(None),
+    max_bytes: int = Query(512 * 1024, ge=1, le=8 * 1024 * 1024),
+    tail: int = Query(0, ge=0, le=10000),
+):
+    cfg = load_local_config()
+    client = ssh_client()
+    try:
+        sftp = client.open_sftp()
+        try:
+            base_dir = base_for_subdir(subdir, sftp)
+        finally:
+            sftp.close()
+
+        if filename:
+            candidates = [filename]
+        else:
+            defaults = cfg.get("defaults", {})
+            base_candidates = defaults.get("result_candidates") or DEFAULT_CONFIG["defaults"]["result_candidates"]
+            last_script = load_last_run(client, base_dir)
+            if last_script:
+                rule = get_effective_rule(cfg, subdir, last_script)
+                if rule.get("result_file"):
+                    candidates = [rule["result_file"]]
+                elif rule.get("result_candidates"):
+                    candidates = [c for c in rule["result_candidates"] if c]
+                else:
+                    candidates = [c for c in base_candidates if c]
+            else:
+                candidates = [c for c in base_candidates if c]
+
+        name, path, truncated, content = _read_first_existing_file(client, base_dir, candidates, max_bytes)
+        if tail and tail > 0:
+            lines = content.splitlines()
+            content = "\n".join(lines[-tail:])
+        return {"file": name, "path": path, "truncated": truncated, "content": content}
+    finally:
+        client.close()
+
+# =================== API: clear_result / clear_input ===================
+
+class ClearRequest(BaseModel):
+    subdir: str
+    filename: Optional[str] = None
+
+@app.post("/clear_result")
+def clear_result(request: ClearRequest):
+    cfg = load_local_config()
+    client = ssh_client()
+    try:
+        sftp = client.open_sftp()
+        try:
+            base_dir = base_for_subdir(request.subdir, sftp)
+        finally:
+            sftp.close()
+
+        if request.filename:
+            target_name = request.filename
+        else:
+            defaults = cfg.get("defaults", {})
+            base_candidates = defaults.get("result_candidates") or DEFAULT_CONFIG["defaults"]["result_candidates"]
+            last_script = load_last_run(client, base_dir)
+            target_name = None
+            if last_script:
+                rule = get_effective_rule(cfg, request.subdir, last_script)
+                if rule.get("result_file"):
+                    target_name = rule["result_file"]
+            if not target_name:
+                target_name = base_candidates[0] if base_candidates else "results.txt"
+
+        target_path = ensure_within_base(base_dir, target_name)
+        write_text_file(client, target_path, "")
+        return {"success": True, "file": target_name, "path": target_path}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        client.close()
+
+class ClearInputRequest(BaseModel):
+    subdir: str
+    filename: Optional[str] = None  # default to 'input'
+
+@app.post("/clear_input")
+def clear_input(request: ClearInputRequest):
+    client = ssh_client()
+    try:
+        sftp = client.open_sftp()
+        try:
+            base_dir = base_for_subdir(request.subdir, sftp)
+        finally:
+            sftp.close()
+
+        target_name = request.filename or "input"
+        target_path = ensure_within_base(base_dir, target_name)
+        write_text_file(client, target_path, "")
+        return {"success": True, "file": target_name, "path": target_path}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        client.close()

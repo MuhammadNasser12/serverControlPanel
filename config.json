@@ -1,0 +1,77 @@
+{
+  "defaults": {
+    "hint_candidates": ["readme", "readme.txt", "README", "README.txt"],
+    "result_candidates": ["results.txt", "results", "RESULTS.txt", "RESULTS"],
+    "timeout": 900,
+    "env": {},
+    "args_template": null,
+    "pre_write_input": false,
+    "input_template": null,
+    "input_values_file": null
+  },
+  "projects": {
+    "custom_inject": {
+      "post_write_input_command": "sed -i \"s/$/'/\" input",
+      "scripts": {
+        "custom_inject.sh": {
+          "vars": {
+            "LB_IP": "10.11.116.150",
+            "PORT": "47000",
+            "INPUT_FILE": "input"
+          },
+          "random_ids": [{ "name": "REQUEST_ID", "digits": 10 }],
+          "args_template": "./inject.py {LB_IP} {PORT} {REQUEST_ID} {INPUT_FILE}",
+          "result_file": "results.txt",
+          "post_append_result_template": "REQUEST_ID={REQUEST_ID}\n",
+          "timeout": 1200
+        }
+      }
+    },
+    "searchInLogs": {
+      "scripts": {
+        "send_request.sh": {
+          "auto_password": {
+            "enabled": true,
+            "value": "bullkpsa_G2R0C001",
+            "patterns": [
+              "\\[sudo\\] password",
+              "(?i)password:",
+              "(?i)enter .* password",
+              "(?i).* password for .*:"
+            ],
+            "max_times": 50
+          },
+          "timeout": 3600
+        }
+      }
+    },
+    "*": {
+      "scripts": {
+        "searchInLogs": {
+          "auto_password": {
+            "enabled": true,
+            "value": "bullkpsa_G2R0C001",
+            "patterns": [
+              "\\[sudo\\] password",
+              "password:",
+              "enter .* password"
+            ],
+            "max_times": 20
+          }
+        },
+        "searchInLogs.sh": {
+          "auto_password": {
+            "enabled": true,
+            "value": "bullkpsa_G2R0C001",
+            "patterns": [
+              "\\[sudo\\] password",
+              "password:",
+              "enter .* password"
+            ],
+            "max_times": 20
+          }
+        }
+      }
+    }
+  }
+}

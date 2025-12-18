@@ -1,0 +1,10 @@
+- change the directory to my dir --> done 
+- user can use more than a script ( drop down ) to chose the file \ --> done 
+-  all the scripts will has the same input file --> done 
+- get imsi from dial with a special treatment
+	--> a new part show the output of result.txt file  --> done 
+- hint for each script (readme file in the dir and each view will show the content) --> done 
+- put readme file and results.txt file in each dir --> done 
+- special treatment for each script --> doen 
+- test each script --> done 
+- health check part 
